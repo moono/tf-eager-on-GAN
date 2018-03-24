@@ -160,20 +160,19 @@ def train(device):
                 # Sample random noise for G
                 batch_z = tf.random_uniform(shape=[batch_size, z_dim], minval=-1., maxval=1.)
 
-                with tfe.GradientTape(persistent=True) as g1:
+                with tfe.GradientTape(persistent=True) as g:
                     # run generator first
                     fake_image = generator(batch_z, is_training)
 
-                    with tfe.GradientTape(persistent=True) as g2:
-                        # run discriminator
-                        real_image = batch_x
-                        d_real_logits = discriminator(real_image, is_training)
-                        d_fake_logits = discriminator(fake_image, is_training)
-                        d_loss = d_loss_fn(d_real_logits, d_fake_logits)
-                        d_grad = g2.gradient(d_loss, discriminator.variables)
+                    # run discriminator
+                    real_image = batch_x
+                    d_real_logits = discriminator(real_image, is_training)
+                    d_fake_logits = discriminator(fake_image, is_training)
+                    d_loss = d_loss_fn(d_real_logits, d_fake_logits)
+                    d_grad = g.gradient(d_loss, discriminator.variables)
 
                     g_loss = g_loss_fn(d_fake_logits)
-                    g_grad = g1.gradient(g_loss, generator.variables)
+                    g_grad = g.gradient(g_loss, generator.variables)
 
                 # apply gradient via pre-defined optimizer
                 d_optimizer.apply_gradients(zip(d_grad, discriminator.variables))
