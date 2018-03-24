@@ -54,4 +54,4 @@ loss_ret, grads_vars = val_grad(...) # input parameters are same as 'some_loss_f
     
 ### tf_eager_on_gan_v2.py
 * Trying to use tf.Network class and tf.track_layer() function for ease variable accessing.
-* Currently under construction.
+* The gradient calculation can be archieved with ```tfe.GradientTape(persistent=True)```
