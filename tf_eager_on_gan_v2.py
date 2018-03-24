@@ -97,22 +97,15 @@ def celoss_zeros(logits, smooth=0.0):
                                                                   labels=tf.zeros_like(logits)*(1.0 - smooth)))
 
 
-def d_loss_fn(generator, discriminator, input_noise, real_image, is_trainig):
-    fake_image = generator(input_noise, is_trainig)
-    d_real_logits = discriminator(real_image, is_trainig)
-    d_fake_logits = discriminator(fake_image, is_trainig)
-
+def d_loss_fn(d_real_logits, d_fake_logits):
     d_loss_real = celoss_ones(d_real_logits, smooth=0.1)
     d_loss_fake = celoss_zeros(d_fake_logits, smooth=0.0)
     loss = d_loss_real + d_loss_fake
     return loss
 
 
-def g_loss_fn(generator, discriminator, input_noise, is_trainig):
-    fake_image = generator(input_noise, is_trainig)
-    d_fake_logits = discriminator(fake_image, is_trainig)
-    loss = celoss_ones(d_fake_logits, smooth=0.1)
-    return loss
+def g_loss_fn(d_fake_logits):
+    return celoss_ones(d_fake_logits, smooth=0.1)
 
 
 def train(device):
@@ -131,13 +124,6 @@ def train(device):
     val_block_size = 10
     val_size = val_block_size * val_block_size
 
-    # for checkpoint saving
-    ckpt_dir = './ckpt'
-    if not os.path.isdir(ckpt_dir):
-        os.makedirs(ckpt_dir)
-    ckpt_prefix_g = os.path.join(ckpt_dir, 'gan-generator')
-    ckpt_prefix_d = os.path.join(ckpt_dir, 'gan-discriminator')
-
     # load mnist data
     mnist = input_data.read_data_sets('mnist-data', one_hot=True)
     inputs_shape = [-1, 28, 28, 1]
@@ -149,8 +135,6 @@ def train(device):
         discriminator = Discriminator()
 
         # prepare optimizer
-        d_val_grad = tfe.implicit_value_and_gradients(d_loss_fn)
-        g_val_grad = tfe.implicit_value_and_gradients(g_loss_fn)
         d_optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=beta1)
         g_optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=beta1)
 
@@ -176,25 +160,32 @@ def train(device):
                 # Sample random noise for G
                 batch_z = tf.random_uniform(shape=[batch_size, z_dim], minval=-1., maxval=1.)
 
-                # get loss related values & (gradients & vars)
-                d_loss_val, d_grad_vars = d_val_grad(generator, discriminator, batch_z, batch_x, is_training)
-                g_loss_val, g_grad_vars = g_val_grad(generator, discriminator, batch_z, is_training)
+                with tfe.GradientTape(persistent=True) as g1:
+                    # run generator first
+                    fake_image = generator(batch_z, is_training)
 
-                # get appropriate gradients & variable pairs
-                d_vars = [(grad, var) for (grad, var) in d_grad_vars if var.name.startswith('discriminator')]
-                g_vars = [(grad, var) for (grad, var) in g_grad_vars if var.name.startswith('generator')]
+                    with tfe.GradientTape(persistent=True) as g2:
+                        # run discriminator
+                        real_image = batch_x
+                        d_real_logits = discriminator(real_image, is_training)
+                        d_fake_logits = discriminator(fake_image, is_training)
+                        d_loss = d_loss_fn(d_real_logits, d_fake_logits)
+                        d_grad = g2.gradient(d_loss, discriminator.variables)
 
-                # save loss
-                d_loss_at_steps.append(np.asscalar(d_loss_val.numpy()))
-                g_loss_at_steps.append(np.asscalar(g_loss_val.numpy()))
+                    g_loss = g_loss_fn(d_fake_logits)
+                    g_grad = g1.gradient(g_loss, generator.variables)
 
                 # apply gradient via pre-defined optimizer
-                d_optimizer.apply_gradients(d_vars)
-                g_optimizer.apply_gradients(g_vars, global_step=global_step)
+                d_optimizer.apply_gradients(zip(d_grad, discriminator.variables))
+                g_optimizer.apply_gradients(zip(g_grad, generator.variables), global_step=global_step)
+
+                # save loss
+                d_loss_at_steps.append(np.asscalar(d_loss.numpy()))
+                g_loss_at_steps.append(np.asscalar(g_loss.numpy()))
 
                 # display current losses
                 if ii % 5 == 0:
-                    t.set_postfix(d_loss=d_loss_val.numpy(), g_loss=g_loss_val.numpy())
+                    t.set_postfix(d_loss=d_loss.numpy(), g_loss=g_loss.numpy())
 
             # validation results at every epoch
             val_z = np.random.uniform(-1, 1, size=(val_size, z_dim))
@@ -202,45 +193,6 @@ def train(device):
             image_fn = os.path.join(assets_dir, 'gan-val-e{:03d}.png'.format(e + 1))
             save_result(fake_image.numpy(), val_block_size, image_fn, color_mode='L')
 
-            # save variables
-            g_variables = (generator.variables + g_optimizer.variables())
-            d_variables = (discriminator.variables + d_optimizer.variables() + [global_step])
-            tfe.Saver(d_variables).save(ckpt_prefix_d, global_step=global_step)
-            tfe.Saver(g_variables).save(ckpt_prefix_g, global_step=global_step)
-
-    return
-
-
-def test(device):
-    z_dim = 100
-    learning_rate = 0.0002
-    beta1 = 0.5
-    val_block_size = 10
-    val_size = val_block_size * val_block_size
-
-    ckpt_dir = './ckpt'
-    ckpt_prefix_g = os.path.join(ckpt_dir, 'gan-generator')
-    ckpt_prefix_d = os.path.join(ckpt_dir, 'gan-discriminator')
-
-    # wrap with available device
-    with tf.device(device):
-        # create generator & discriminator
-        with tfe.restore_variables_on_create('{:s}-12870'.format(ckpt_prefix_g)):
-            generator = Generator()
-            g_optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=beta1)
-
-            # the inference must be held within with context manager in this case...
-            val_z = tf.random_uniform(shape=[val_size, z_dim], minval=-1., maxval=1.)
-            fake_image = generator(val_z, is_trainig=False)
-            image_fn = 'gan-test-out.png'
-            save_result(fake_image.numpy(), val_block_size, image_fn, color_mode='L')
-
-        with tfe.restore_variables_on_create('{:s}-12870'.format(ckpt_prefix_d)):
-            discriminator = Discriminator()
-            d_optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=beta1)
-            global_step = tf.train.get_or_create_global_step()
-
-        print(global_step.numpy())
     return
 
 
@@ -248,18 +200,12 @@ def main():
     # Enable eager execution
     tfe.enable_eager_execution()
 
-    # (device, data_format) = ('/gpu:0', 'channels_first')
-    # if tfe.num_gpus() <= 0:
-    #     (device, data_format) = ('/cpu:0', 'channels_last')
-
     # check gpu availability
     device = '/gpu:0'
     if tfe.num_gpus() <= 0:
         device = '/cpu:0'
 
     train(device)
-    # test(device)
-
     return
 
 
