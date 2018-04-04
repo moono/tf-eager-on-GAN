@@ -168,11 +168,14 @@ def train(device):
                     real_image = batch_x
                     d_real_logits = discriminator(real_image, is_training)
                     d_fake_logits = discriminator(fake_image, is_training)
-                    d_loss = d_loss_fn(d_real_logits, d_fake_logits)
-                    d_grad = g.gradient(d_loss, discriminator.variables)
 
+                    # compute losses
+                    d_loss = d_loss_fn(d_real_logits, d_fake_logits)
                     g_loss = g_loss_fn(d_fake_logits)
-                    g_grad = g.gradient(g_loss, generator.variables)
+
+                # compute gradients
+                d_grad = g.gradient(d_loss, discriminator.variables)
+                g_grad = g.gradient(g_loss, generator.variables)
 
                 # apply gradient via pre-defined optimizer
                 d_optimizer.apply_gradients(zip(d_grad, discriminator.variables))
