@@ -29,7 +29,8 @@ def parse_fn(images, z_vec):
 def input_fn(mnist_images, train_z_vectors, batch_size):
     dataset = tf.data.Dataset.from_generator(make_generator(mnist_images, train_z_vectors), (tf.float32, tf.float32))
     dataset = dataset.map(parse_fn)
-    dataset = dataset.shuffle(buffer_size=1000)  # randomize
+    dataset = dataset.prefetch(batch_size)
+    dataset = dataset.shuffle(buffer_size=10000)  # randomize
     dataset = dataset.batch(batch_size)
     return dataset
 
@@ -79,11 +80,11 @@ class Generator(tfe.Network):
         self.conv4 = self.track_layer(tf.layers.Conv2DTranspose(1, self.n_k, 2, 'same'))
         return
 
-    def call(self, inputs, is_trainig):
+    def call(self, inputs, is_training):
         with tf.variable_scope('generator'):
             x = tf.nn.leaky_relu(tf.reshape(self.dense1(inputs), shape=[-1, 3, 3, self.n_f]))
-            x = tf.nn.leaky_relu(self.bn2(self.conv2(x), training=is_trainig))
-            x = tf.nn.leaky_relu(self.bn3(self.conv3(x), training=is_trainig))
+            x = tf.nn.leaky_relu(self.bn2(self.conv2(x), training=is_training))
+            x = tf.nn.leaky_relu(self.bn3(self.conv3(x), training=is_training))
             x = tf.tanh(self.conv4(x))
         return x
 
@@ -104,11 +105,11 @@ class Discriminator(tfe.Network):
         self.dense4 = self.track_layer(tf.layers.Dense(1))
         return
 
-    def call(self, inputs, is_trainig):
+    def call(self, inputs, is_training):
         with tf.variable_scope('discriminator'):
             x = tf.nn.leaky_relu(self.conv1(inputs))
-            x = tf.nn.leaky_relu(self.bn2(self.conv2(x), training=is_trainig))
-            x = tf.nn.leaky_relu(self.bn3(self.conv3(x), training=is_trainig))
+            x = tf.nn.leaky_relu(self.bn2(self.conv2(x), training=is_training))
+            x = tf.nn.leaky_relu(self.bn3(self.conv3(x), training=is_training))
             x = self.dense4(self.flatten4(x))
         return x
 
@@ -161,12 +162,41 @@ def run_generator(generator, z_dim, val_block_size):
 
     # validation results at every epoch
     val_z = np.random.uniform(-1, 1, size=(val_size, z_dim))
-    fake_image = generator(val_z, is_trainig=False)
+    fake_image = generator(val_z, is_training=False)
 
     return fake_image
 
 
-def train(train_images, train_z_vectors, params, generator, discriminator):
+def train(generator, discriminator):
+    # configure directories
+    assets_dir = './assets'
+    models_dir = './models'
+    if not os.path.isdir(assets_dir):
+        os.makedirs(assets_dir)
+    if not os.path.isdir(models_dir):
+        os.makedirs(models_dir)
+
+    # hyper parameters
+    params = {
+        'z_dim': 100,
+        'epochs': 30,
+        'batch_size': 128,
+        'learning_rate': 0.0002,
+        'beta1': 0.5,
+        'val_block_size': 10,
+        'assets_dir': assets_dir,
+        'models_dir': models_dir,
+    }
+
+    # load training and eval data
+    mnist = tf.contrib.learn.datasets.load_dataset('mnist')
+    train_images = mnist.train.images  # Returns np.array
+    train_z_vectors = np.random.uniform(-1.0, 1.0, size=(train_images.shape[0], params['z_dim']))
+
+    # prepare saver
+    checkpoint_directory = params['models_dir']
+    checkpoint_prefix = os.path.join(checkpoint_directory, 'v3-ckpt')
+
     # prepare train data
     train_dataset = input_fn(train_images, train_z_vectors, params['batch_size'])
 
@@ -177,6 +207,10 @@ def train(train_images, train_z_vectors, params, generator, discriminator):
     # for loss savings
     d_losses = []
     g_losses = []
+
+    # initiate saver (only need generator) - run dummy process first
+    _ = generator(tf.zeros([1, params['z_dim']], dtype=tf.float32), is_training=False)
+    generator_saver = tfe.Saver(var_list=generator.variables)
 
     # is_training flag
     is_training = True
@@ -200,7 +234,7 @@ def train(train_images, train_z_vectors, params, generator, discriminator):
         d_losses.append(epoch_d_loss_avg.result())
         g_losses.append(epoch_g_loss_avg.result())
 
-        print("Epoch {:03d}: d_loss: {:.3f}, g_loss: {:.3f}".format(e + 1,
+        print('Epoch {:03d}: d_loss: {:.3f}, g_loss: {:.3f}'.format(e + 1,
                                                                     epoch_d_loss_avg.result(),
                                                                     epoch_g_loss_avg.result()))
 
@@ -209,16 +243,40 @@ def train(train_images, train_z_vectors, params, generator, discriminator):
         image_fn = os.path.join(params['assets_dir'], 'gan-val-e{:03d}.png'.format(e + 1))
         save_result(fake_image.numpy(), params['val_block_size'], image_fn, color_mode='L')
 
+        # save model
+        generator_saver.save(checkpoint_prefix, global_step=tf.train.get_or_create_global_step())
+
     # visualize losses
     fig, axes = plt.subplots(2, sharex=True, figsize=(12, 8))
     fig.suptitle('Training Losses')
 
-    axes[0].set_ylabel("d_oss", fontsize=14)
+    axes[0].set_ylabel('d_oss', fontsize=14)
     axes[0].plot(d_losses)
-    axes[1].set_ylabel("g_loss", fontsize=14)
+    axes[1].set_ylabel('g_loss', fontsize=14)
     axes[1].plot(g_losses)
 
     plt.show()
+    return
+
+
+def predict(generator):
+    z_dim = 100
+
+    # run dummy process
+    _ = generator(tf.zeros([1, z_dim], dtype=tf.float32), is_training=False)
+
+    # create test data
+    val_block_size = 10
+    val_size = val_block_size * val_block_size
+    test_z = np.random.uniform(-1, 1, size=(val_size, z_dim))
+
+    # initiate saver
+    models_dir = './models'
+    saver = tfe.Saver(var_list=generator.variables)
+    saver.restore(tf.train.latest_checkpoint(models_dir))
+
+    gen_out = generator(test_z, is_training=False)
+    save_result(gen_out.numpy(), val_block_size, 'gen_out.png', color_mode='L')
     return
 
 
@@ -226,32 +284,15 @@ def main():
     # Enable eager execution
     tfe.enable_eager_execution()
 
-    # result saving dir
-    assets_dir = './assets'
-    if not os.path.isdir(assets_dir):
-        os.makedirs(assets_dir)
-
-    # hyper parameters
-    training_params = {
-        'z_dim': 100,
-        'epochs': 30,
-        'batch_size': 128,
-        'learning_rate': 0.0002,
-        'beta1': 0.5,
-        'val_block_size': 10,
-        'assets_dir': assets_dir,
-    }
-
-    # load training and eval data
-    mnist = tf.contrib.learn.datasets.load_dataset("mnist")
-    train_images = mnist.train.images  # Returns np.array
-    train_z_vectors = np.random.uniform(-1.0, 1.0, size=(train_images.shape[0], training_params['z_dim']))
-
     # create generator & discriminator
     generator = Generator()
     discriminator = Discriminator()
 
-    train(train_images, train_z_vectors, training_params, generator, discriminator)
+    # 1. train
+    train(generator, discriminator)
+
+    # 2. predict
+    predict(generator)
     return
 
 
