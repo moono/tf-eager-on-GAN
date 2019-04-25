@@ -1,5 +1,11 @@
 # Tensorflow Eager on GAN
 
+## Notice
+* This folder contains previous versions (tensorflow 1.x) of eager excution example on GAN
+* Below is old README.md file
+
+---
+
 ## Tensorflow 1.6
 ### Basic usage - official Tensorflow documents
 * [Eager Documentation](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/contrib/eager)
